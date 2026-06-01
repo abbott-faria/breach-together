@@ -3,29 +3,32 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BREACH - Engine Evolution</title>
+<title>BREACH - Multi-Agent System</title>
 <style>
-  body { background: #0a0a0a; color: #e0e0e0; font-family: monospace; padding: 20px; user-select: none; }
-  #setup { background: #141414; padding: 20px; border: 1px solid #333; max-width: 400px; margin-bottom: 20px; }
-  button { background: #222; color: #fff; border: 1px solid #444; padding: 8px 16px; cursor: pointer; margin-right: 10px; font-family: monospace;}
-  button:hover { background: #333; }
-  input { background: #000; color: #fff; border: 1px solid #444; padding: 7px; font-family: monospace; }
-  canvas { background: #111; display: block; border: 1px solid #222; box-shadow: 0 0 20px rgba(0,0,0,0.8); }
-  #status { color: #888; font-size: 12px; margin-top: 10px; }
+  body { background: #070708; color: #a0a5b5; font-family: monospace; padding: 15px; margin: 0; overflow: hidden; user-select: none; }
+  #interface { background: #0f1015; padding: 15px; border: 1px solid #222530; display: flex; gap: 15px; align-items: center; margin-bottom: 10px; }
+  button { background: #1c1d26; color: #fff; border: 1px solid #32374a; padding: 6px 12px; cursor: pointer; font-family: monospace; font-weight: bold; }
+  button:hover { background: #252733; border-color: #434961; }
+  input { background: #020203; color: #ffcc44; border: 1px solid #32374a; padding: 6px; font-family: monospace; width: 100px; text-transform: uppercase; text-align: center;}
+  #status { font-size: 11px; color: #62687d; }
+  #frame-container { position: relative; }
+  canvas { background: #020203; display: block; border: 1px solid #1c1d26; box-shadow: 0 10px 30px rgba(0,0,0,0.7); }
 </style>
 </head>
 <body>
 
-  <h2>ENGINE FOUNDATION V2 (LERP + SPEED ADJUSTMENT)</h2>
-  <div id="setup">
-    <button id="btnCreate">Create Lobby</button>
-    <hr style="border:0; border-top:1px solid #222; margin:15px 0;">
-    <input type="text" id="roomInput" placeholder="Enter Room ID">
-    <button id="btnJoin">Join Lobby</button>
-    <div id="status">Status: Disconnected</div>
+  <div id="interface">
+    <button id="btnCreate">HOST LOBBY</button>
+    <div>
+      <input type="text" id="roomInput" placeholder="CODE">
+      <button id="btnJoin">JOIN LOBBY</button>
+    </div>
+    <div id="status">SYS // DISCONNECTED</div>
   </div>
 
-  <canvas id="gameCanvas" width="800" height="500"></canvas>
+  <div id="frame-container">
+    <canvas id="gameCanvas" width="960" height="640"></canvas>
+  </div>
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
@@ -42,75 +45,511 @@
 
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
-
     const rtcConfig = { iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }] };
 
     let peerConnection = null;
     let dataChannel = null;
     let isHost = false;
-
-    // Movement configuration
-    const MOVE_SPEED = 5; 
-    const keysPressed = {};
-
-    // Simulation Entities State
-    const localPlayer = { x: 100, y: 250, color: '#c8382a' };
-    
-    // Remote Player tracks both target (network) position and visual (lerped) position
-    const remotePlayer = { 
-      targetX: 150, targetY: 250, 
-      visualX: 150, visualY: 250, 
-      color: '#38a02a' 
-    };
+    let networkConnected = false;
 
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const statusText = document.getElementById('status');
 
-    // -- CONTROLLER HANDLING (Smooth Keyboard Tracking) -------------------------
+    // -- CACHE ENGINE FOR MAP OPTIMIZATION --
+    const cacheCanvas = document.createElement('canvas');
+    cacheCanvas.width = canvas.width;
+    cacheCanvas.height = canvas.height;
+    const cacheCtx = cacheCanvas.getContext('2d');
+
+    // -- ENGINE CONSTANTS & SCHEMATICS --
+    const MOVE_SPEED = 4;
+    const BULLET_SPEED = 12;
+    const keysPressed = {};
+    const mousePos = { x: 0, y: 0 };
+    let clickTriggered = false;
+
+    // Simulation Repositories
+    let rooms = [];
+    let walls = [];
+    let boxes = [];
+    let doors = [];
+    let enemies = [];
+    let bullets = [];
+    let particles = [];
+
+    // Player Object Archetypes 
+    const player1 = { id: 'host', x: 0, y: 0, angle: 0, hp: 100, maxHp: 100, size: 14, color: '#ff4444', isDead: false };
+    const player2 = { id: 'client', x: 0, y: 0, angle: 0, hp: 100, maxHp: 100, size: 14, color: '#33ff33', isDead: false };
+    
+    // Client Input Cache Mirror (Used by Host to execute remote moves)
+    const clientInputs = { keys: {}, mouse: { x: 0, y: 0 }, click: false };
+
+    // Interpolation Snap Targets for Client
+    const interpTargets = {
+      p1: { x: 0, y: 0, angle: 0, hp: 100, isDead: false },
+      p2: { x: 0, y: 0, angle: 0, hp: 100, isDead: false },
+      enemies: [],
+      bullets: [],
+      doors: [],
+      boxes: []
+    };
+
+    // -- MAP GENERATOR (HOST LOGIC ONLY) --
+    function generateProceduralMap() {
+      walls = []; boxes = []; doors = []; rooms = []; enemies = []; bullets = []; particles = [];
+      
+      // Define a fixed set of deterministic rooms
+      rooms = [
+        { x: 60, y: 60, w: 240, h: 180 },
+        { x: 660, y: 60, w: 240, h: 180 },
+        { x: 360, y: 380, w: 240, h: 200 },
+        { x: 60, y: 380, w: 220, h: 180 },
+        { x: 660, y: 380, w: 240, h: 200 }
+      ];
+
+      // Add borders
+      walls.push({ x: 0, y: 0, w: canvas.width, h: 20 });
+      walls.push({ x: 0, y: canvas.height - 20, w: canvas.width, h: 20 });
+      walls.push({ x: 0, y: 0, w: 20, h: canvas.height });
+      walls.push({ x: canvas.width - 20, y: 0, w: 20, h: canvas.height });
+
+      // Generate room boundaries and inner dividers
+      rooms.forEach(r => {
+        walls.push({ x: r.x, y: r.y, w: r.w, h: 12 }); // Top wall
+        walls.push({ x: r.x, y: r.y + r.h - 12, w: r.w, h: 12 }); // Bottom wall
+        walls.push({ x: r.x, y: r.y, w: 12, h: r.h }); // Left wall
+        walls.push({ x: r.x + r.w - 12, y: r.y, w: 12, h: r.h }); // Right wall
+
+        // Spawn a scattering of cover boxes inside rooms
+        for(let i=0; i<3; i++) {
+          boxes.push({
+            id: 'box_' + Math.random(),
+            x: r.x + 40 + Math.random() * (r.w - 100),
+            y: r.y + 40 + Math.random() * (r.h - 100),
+            w: 24, h: 24, hp: 40
+          });
+        }
+      });
+
+      // Simple corridors connections / breaks
+      doors.push({ id: 'd1', x: 300, y: 120, w: 12, h: 40, open: false, lerpOpen: 0 });
+      doors.push({ id: 'd2', x: 660, y: 120, w: 12, h: 40, open: false, lerpOpen: 0 });
+      doors.push({ id: 'd3', x: 470, y: 380, w: 40, h: 12, open: false, lerpOpen: 0 });
+
+      // Anchor starting positions
+      player1.x = 100; player1.y = 120; player1.hp = 100; player1.isDead = false;
+      player2.x = 140; player2.y = 120; player2.hp = 100; player2.isDead = false;
+
+      // Populate Host-managed enemies
+      enemies = [
+        { id: 'e1', x: 760, y: 140, hp: 50, speed: 1.5, size: 12, targetNode: null },
+        { id: 'e2', x: 480, y: 480, hp: 50, speed: 1.5, size: 12, targetNode: null },
+        { id: 'e3', x: 160, y: 460, hp: 50, speed: 1.5, size: 12, targetNode: null }
+      ];
+
+      preRenderStaticScenery();
+    }
+
+    // -- BLIT PRE-RENDER SCENERY ENGINE --
+    function preRenderStaticScenery() {
+      cacheCtx.fillStyle = '#020203';
+      cacheCtx.fillRect(0, 0, cacheCanvas.width, cacheCanvas.height);
+
+      // Floor Grid Blueprint
+      cacheCtx.strokeStyle = '#0e0f14';
+      cacheCtx.lineWidth = 1;
+      for (let i = 0; i < cacheCanvas.width; i += 32) {
+        cacheCtx.beginPath(); cacheCtx.moveTo(i, 0); cacheCtx.lineTo(i, cacheCanvas.height); cacheCtx.stroke();
+      }
+      for (let j = 0; j < cacheCanvas.height; j += 32) {
+        cacheCtx.beginPath(); cacheCtx.moveTo(0, j); cacheCtx.lineTo(cacheCanvas.width, j); cacheCtx.stroke();
+      }
+
+      // Render Static Rooms Floors decoration
+      rooms.forEach(r => {
+        cacheCtx.fillStyle = '#090a0f';
+        cacheCtx.fillRect(r.x, r.y, r.w, r.h);
+      });
+
+      // Stamp Static Structural Walls
+      cacheCtx.fillStyle = '#1c1d26';
+      walls.forEach(w => {
+        cacheCtx.fillRect(w.x, w.y, w.w, w.h);
+        cacheCtx.strokeStyle = '#2d3142';
+        cacheCtx.strokeRect(w.x, w.y, w.w, w.h);
+      });
+    }
+
+    // -- COLLISION ENGINE MATRIX --
+    function checkCollision(entity, size, targetX, targetY) {
+      // Wall Blockades
+      for (let w of walls) {
+        if (targetX + size > w.x && targetX - size < w.x + w.w &&
+            targetY + size > w.y && targetY - size < w.y + w.h) {
+          return true;
+        }
+      }
+      // Structural Boxes
+      for (let b of boxes) {
+        if (targetX + size > b.x && targetX - size < b.x + b.w &&
+            targetY + size > b.y && targetY - size < b.y + b.h) {
+          return true;
+        }
+      }
+      // Secure Closed Doors
+      for (let d of doors) {
+        if (!d.open) {
+          if (targetX + size > d.x && targetX - size < d.x + d.w &&
+              targetY + size > d.y && targetY - size < d.y + d.h) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    // -- CONTROLLER ROUTINES --
     window.addEventListener('keydown', e => { keysPressed[e.key.toLowerCase()] = true; });
     window.addEventListener('keyup', e => { keysPressed[e.key.toLowerCase()] = false; });
+    
+    canvas.addEventListener('mousemove', e => {
+      const rect = canvas.getBoundingClientRect();
+      mousePos.x = e.clientX - rect.left;
+      mousePos.y = e.clientY - rect.top;
+    });
 
-    function processMovement() {
-      let dx = 0;
-      let dy = 0;
+    canvas.addEventListener('mousedown', e => { if (e.button === 0) clickTriggered = true; });
+    canvas.addEventListener('mouseup', e => { if (e.button === 0) clickTriggered = false; });
 
-      if (keysPressed['w'] || keysPressed['arrowup']) dy -= 1;
-      if (keysPressed['s'] || keysPressed['arrowdown']) dy += 1;
-      if (keysPressed['a'] || keysPressed['arrowleft']) dx -= 1;
-      if (keysPressed['d'] || keysPressed['arrowright']) dx += 1;
+    // -- HOST: SIMULATION Ticks --
+    function runHostPhysicsTick() {
+      // 1. Process Host Local Input Movement
+      processAgentMovement(player1, keysPressed);
+      player1.angle = Math.atan2(mousePos.y - player1.y, mousePos.x - player1.x);
 
-      // Check if moving
-      if (dx !== 0 || dy !== 0) {
-        // Normalize diagonals so players don't move faster at 45 degree angles
-        const length = Math.sqrt(dx * dx + dy * dy);
-        localPlayer.x += (dx / length) * MOVE_SPEED;
-        localPlayer.y += (dy / length) * MOVE_SPEED;
+      // 2. Process Mirrored Client Input Movement
+      if (networkConnected) {
+        processAgentMovement(player2, clientInputs.keys);
+        player2.angle = Math.atan2(clientInputs.mouse.y - player2.y, clientInputs.mouse.x - player2.x);
+      }
 
-        // Keep inside canvas bounds
-        localPlayer.x = Math.max(0, Math.min(canvas.width - 24, localPlayer.x));
-        localPlayer.y = Math.max(0, Math.min(canvas.height - 24, localPlayer.y));
+      // 3. Fire Actions
+      if (clickTriggered && !player1.isDead) spawnBullet(player1, mousePos);
+      if (clientInputs.click && networkConnected && !player2.isDead) spawnBullet(player2, clientInputs.mouse);
 
-        // Network update drop
-        if (dataChannel && dataChannel.readyState === 'open') {
-          dataChannel.send(JSON.stringify({ x: localPlayer.x, y: localPlayer.y }));
+      // Reset client click impulse
+      clientInputs.click = false; 
+
+      // 4. Doors Automated Automation
+      doors.forEach(d => {
+        let nearHost = Math.hypot(player1.x - (d.x + d.w/2), player1.y - (d.y + d.h/2)) < 60;
+        let nearClient = networkConnected && Math.hypot(player2.x - (d.x + d.w/2), player2.y - (d.y + d.h/2)) < 60;
+        d.open = (nearHost || nearClient);
+        d.lerpOpen += ((d.open ? 1 : 0) - d.lerpOpen) * 0.15;
+      });
+
+      // 5. Update Projectile Vectors
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        let b = bullets[i];
+        b.x += b.vx; b.y += b.vy;
+
+        let hitWall = checkCollision(b, 2, b.x, b.y);
+        
+        // Damage verification on boxes
+        if (!hitWall) {
+          for(let box of boxes) {
+            if (b.x > box.x && b.x < box.x + box.w && b.y > box.y && b.y < box.y + box.h) {
+              box.hp -= 15;
+              hitWall = true;
+              createExplosionParticles(b.x, b.y, '#9e7343');
+              break;
+            }
+          }
         }
+
+        // Damage verification on enemies
+        if (!hitWall) {
+          for (let e of enemies) {
+            if (Math.hypot(b.x - e.x, b.y - e.y) < e.size) {
+              e.hp -= 20;
+              hitWall = true;
+              createExplosionParticles(b.x, b.y, '#ffffff');
+              break;
+            }
+          }
+        }
+
+        // Damage calculation against reciprocal players
+        if (!hitWall && b.owner !== 'host' && !player1.isDead && Math.hypot(b.x - player1.x, b.y - player1.y) < player1.size) {
+          player1.hp -= 10; hitWall = true;
+          createExplosionParticles(b.x, b.y, player1.color);
+          if(player1.hp <= 0) player1.isDead = true;
+        }
+        if (!hitWall && b.owner !== 'client' && networkConnected && !player2.isDead && Math.hypot(b.x - player2.x, b.y - player2.y) < player2.size) {
+          player2.hp -= 10; hitWall = true;
+          createExplosionParticles(b.x, b.y, player2.color);
+          if(player2.hp <= 0) player2.isDead = true;
+        }
+
+        if (hitWall || b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+          bullets.splice(i, 1);
+        }
+      }
+
+      // Purge broken breakable boxes
+      boxes = boxes.filter(b => b.hp > 0);
+
+      // 6. Enemy Pathing AI Tick
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        let e = enemies[i];
+        if (e.hp <= 0) {
+          createExplosionParticles(e.x, e.y, '#ff4444', 15);
+          enemies.splice(i, 1);
+          continue;
+        }
+
+        // Determine closest target vector
+        let target = player1;
+        if (networkConnected && !player2.isDead && (player1.isDead || Math.hypot(player2.x - e.x, player2.y - e.y) < Math.hypot(player1.x - e.x, player1.y - e.y))) {
+          target = player2;
+        }
+
+        if (target && !target.isDead) {
+          let angle = Math.atan2(target.y - e.y, target.x - e.x);
+          let nX = e.x + Math.cos(angle) * e.speed;
+          let nY = e.y + Math.sin(angle) * e.speed;
+          
+          if (!checkCollision(e, e.size, nX, nY)) {
+            e.x = nX; e.y = nY;
+          }
+
+          // Damage loop to player via collision contact
+          if (Math.hypot(target.x - e.x, target.y - e.y) < target.size + e.size) {
+            target.hp -= 0.4;
+            if(target.hp <= 0) target.isDead = true;
+          }
+        }
+      }
+
+      // 7. Local Particle tracking
+      updateParticlesSystem();
+
+      // 8. Stream complete snapshot packet payload to client
+      if (networkConnected && dataChannel.readyState === 'open') {
+        const statePayload = {
+          p1: { x: player1.x, y: player1.y, angle: player1.angle, hp: player1.hp, isDead: player1.isDead },
+          p2: { x: player2.x, y: player2.y, angle: player2.angle, hp: player2.hp, isDead: player2.isDead },
+          enemies: enemies.map(e => ({ x: e.x, y: e.y, size: e.size })),
+          bullets: bullets.map(b => ({ x: b.x, y: b.y })),
+          doors: doors.map(d => ({ id: d.id, lerpOpen: d.lerpOpen })),
+          boxes: boxes.map(b => ({ x: b.x, y: b.y, w: b.w, h: b.h }))
+        };
+        dataChannel.send(JSON.stringify({ type: 'SNAPSHOT', payload: statePayload }));
       }
     }
 
-    // -- HOST FLOW -------------------------------------------------------------
+    function processAgentMovement(agent, inputs) {
+      if (agent.isDead) return;
+      let dx = 0, dy = 0;
+      if (inputs['w'] || inputs['arrowup']) dy -= 1;
+      if (inputs['s'] || inputs['arrowdown']) dy += 1;
+      if (inputs['a'] || inputs['arrowleft']) dx -= 1;
+      if (inputs['d'] || inputs['arrowright']) dx += 1;
+
+      if (dx !== 0 || dy !== 0) {
+        const len = Math.sqrt(dx*dx + dy*dy);
+        const nX = agent.x + (dx / len) * MOVE_SPEED;
+        const nY = agent.y + (dy / len) * MOVE_SPEED;
+
+        if (!checkCollision(agent, agent.size, nX, agent.y)) agent.x = nX;
+        if (!checkCollision(agent, agent.size, agent.x, nY)) agent.y = nY;
+      }
+    }
+
+    function spawnBullet(ownerObj, targetPos) {
+      if (ownerObj.lastFire && Date.now() - ownerObj.lastFire < 200) return; // Fire rate gate
+      ownerObj.lastFire = Date.now();
+
+      const angle = Math.atan2(targetPos.y - ownerObj.y, targetPos.x - ownerObj.x);
+      bullets.push({
+        x: ownerObj.x + Math.cos(angle) * ownerObj.size,
+        y: ownerObj.y + Math.sin(angle) * ownerObj.size,
+        vx: Math.cos(angle) * BULLET_SPEED,
+        vy: Math.sin(angle) * BULLET_SPEED,
+        owner: ownerObj.id
+      });
+    }
+
+    function createExplosionParticles(x, y, color, count = 5) {
+      for(let i=0; i<count; i++) {
+        particles.push({
+          x: x, y: y,
+          vx: (Math.random() - 0.5) * 4,
+          vy: (Math.random() - 0.5) * 4,
+          life: 20, maxLife: 20, color: color
+        });
+      }
+    }
+
+    function updateParticlesSystem() {
+      for(let i=particles.length-1; i>=0; i--) {
+        let p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.life--;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+
+    // -- CLIENT: UPSTREAM SYSTEM INPUT PACKET TICK --
+    function transmitClientInputUpstream() {
+      if (networkConnected && dataChannel.readyState === 'open') {
+        const localInputMap = {
+          keys: {
+            w: keysPressed['w'] || keysPressed['arrowup'],
+            s: keysPressed['s'] || keysPressed['arrowdown'],
+            a: keysPressed['a'] || keysPressed['arrowleft'],
+            d: keysPressed['d'] || keysPressed['arrowright']
+          },
+          mouse: mousePos,
+          click: clickTriggered
+        };
+        dataChannel.send(JSON.stringify({ type: 'INPUT', payload: localInputMap }));
+        clickTriggered = false; // Reset local click trigger switch immediately
+      }
+    }
+
+    // -- MASTER GRAPHICS RENDER LOOP --
+    function engineFrameLoop() {
+      if (isHost) {
+        runHostPhysicsTick();
+        // Bind targets to current states directly for host frame rendering
+        interpTargets.p1 = player1;
+        interpTargets.p2 = player2;
+        interpTargets.enemies = enemies;
+        interpTargets.bullets = bullets;
+        interpTargets.doors = doors;
+        interpTargets.boxes = boxes;
+      } else {
+        transmitClientInputUpstream();
+        // Client performs structural animation lerping on its frame targets
+        updateParticlesSystem();
+      }
+
+      // Render Static Layer via hardware offscreen acceleration stamp
+      ctx.drawImage(cacheCanvas, 0, 0);
+
+      // Render Structural Cover Boxes
+      ctx.fillStyle = '#7a5835';
+      ctx.strokeStyle = '#543b23';
+      interpTargets.boxes.forEach(b => {
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+      });
+
+      // Render Moving Dynamic Doors
+      ctx.fillStyle = '#445577';
+      interpTargets.doors.forEach(d => {
+        // Look up dimensions dynamically from original profile if needed or match layout
+        let w = (d.id === 'd3') ? 40 : 12;
+        let h = (d.id === 'd3') ? 12 : 40;
+        let currentH = h * (1 - d.lerpOpen);
+        if (currentH > 0) {
+          ctx.fillRect(d.x, d.y, w, currentH);
+          ctx.strokeRect(d.x, d.y, w, currentH);
+        }
+      });
+
+      // Render Projectiles
+      ctx.fillStyle = '#ffcc44';
+      interpTargets.bullets.forEach(b => {
+        ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI*2); ctx.fill();
+      });
+
+      // Render AI Enemies
+      ctx.fillStyle = '#ff3333';
+      interpTargets.enemies.forEach(e => {
+        ctx.beginPath(); ctx.arc(e.x, e.y, e.size || 12, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = '#220000'; ctx.stroke();
+      });
+
+      // Render Local / Remote Active Players
+      if (!interpTargets.p1.isDead) renderAgent(interpTargets.p1, player1.color);
+      if (!interpTargets.p2.isDead) renderAgent(interpTargets.p2, player2.color);
+
+      // Render Particle Layers
+      particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillRect(p.x, p.y, 3, 3);
+      });
+      ctx.globalAlpha = 1.0; // Restore global opacity context
+
+      requestAnimationFrame(engineFrameLoop);
+    }
+
+    function renderAgent(target, color) {
+      ctx.save();
+      ctx.translate(target.x, target.y);
+      ctx.rotate(target.angle);
+      
+      // Draw character body
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI*2); ctx.fill();
+      
+      // Draw direction pointer vector
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(4, -3, 12, 6);
+      ctx.restore();
+
+      // Health bar overhead vector stamp
+      ctx.fillStyle = '#222'; ctx.fillRect(target.x - 15, target.y - 24, 30, 4);
+      ctx.fillStyle = color; ctx.fillRect(target.x - 15, target.y - 24, 30 * (target.hp / 100), 4);
+    }
+
+    // -- NETWORKING WORKFLOW HANDLERS --
+    function attachChannelPipelines() {
+      dataChannel.onopen = () => {
+        networkConnected = true;
+        statusText.textContent = `SYS // CHANNEL ACTIVE [${isHost ? 'HOST' : 'CLIENT'}]`;
+        statusText.style.color = "#33ff33";
+        if (isHost) generateProceduralMap();
+      };
+
+      dataChannel.onmessage = e => {
+        const msg = JSON.parse(e.data);
+        
+        if (isHost && msg.type === 'INPUT') {
+          // Sync client data arrays internally
+          clientInputs.keys = msg.payload.keys;
+          clientInputs.mouse = msg.payload.mouse;
+          if (msg.payload.click) clientInputs.click = true;
+        } 
+        
+        if (!isHost && msg.type === 'SNAPSHOT') {
+          // Client assigns linear target interpolation values from server metrics
+          const snap = msg.payload;
+          interpTargets.p1 = snap.p1;
+          interpTargets.p2 = snap.p2;
+          interpTargets.enemies = snap.enemies;
+          interpTargets.bullets = snap.bullets;
+          interpTargets.doors = snap.doors;
+          interpTargets.boxes = snap.boxes;
+          
+          // Generate local graphical bullet puff frames if new bullets detected
+          if(snap.bullets.length > 0) {
+             snap.bullets.forEach(sb => { if(Math.random() > 0.7) createExplosionParticles(sb.x, sb.y, '#ffcc44', 1); });
+          }
+        }
+      };
+    }
+
+    // -- FIREBASE WEBRTC SETUP --
     document.getElementById('btnCreate').addEventListener('click', async () => {
       isHost = true;
-      statusText.textContent = "Status: Generating Lobby...";
-      
-      // Update starting positions explicitly so host spawns on the left, client on right
-      localPlayer.x = 200; localPlayer.y = 250;
-      remotePlayer.targetX = 250; remotePlayer.targetY = 250;
-      remotePlayer.visualX = 250; remotePlayer.visualY = 250;
-
+      statusText.textContent = "SYS // CONFIGURING WEB_RTC...";
       peerConnection = new RTCPeerConnection(rtcConfig);
       dataChannel = peerConnection.createDataChannel('game-payload', { ordered: false, maxRetransmits: 0 });
-      setupDataChannelHandlers();
+      attachChannelPipelines();
 
       const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       const roomDoc = doc(db, 'rooms', roomId);
@@ -124,8 +563,8 @@
       await peerConnection.setLocalDescription(offer);
       await setDoc(roomDoc, { offer: { type: offer.type, sdp: offer.sdp } });
 
-      document.getElementById('setup').innerHTML = `<h3>ROOM CODE: <span style="color:#ffcc44">${roomId}</span></h3><p>Share this code with your peer.</p>`;
-      statusText.textContent = "Status: Waiting for Peer Connection...";
+      document.getElementById('interface').innerHTML = `<h3>ROOM ID: <span style="color:#ffcc44">${roomId}</span></h3><div id="status">SYS // OPEN_LINK_WAITING...</div>`;
+      statusText.textContent = "SYS // ESTABLISHING LOCAL SIMULATION LOBBY...";
 
       onSnapshot(roomDoc, snapshot => {
         const data = snapshot.data();
@@ -142,31 +581,30 @@
           }
         });
       });
+      
+      generateProceduralMap();
     });
 
-    // -- CLIENT FLOW -----------------------------------------------------------
     document.getElementById('btnJoin').addEventListener('click', async () => {
       const roomId = document.getElementById('roomInput').value.trim().toUpperCase();
-      if (!roomId) return alert("Please specify a valid Room Code");
+      if (!roomId) return alert("EMPTY CODE POINTER ERROR");
 
       isHost = false;
-      statusText.textContent = "Status: Querying host data...";
-
-      // Client spawns on the right, host target on left
-      localPlayer.x = 250; localPlayer.y = 250;
-      remotePlayer.targetX = 200; remotePlayer.targetY = 250;
-      remotePlayer.visualX = 200; remotePlayer.visualY = 250;
+      statusText.textContent = "SYS // HANDSHAKING REMOTE SIGNAL...";
+      
+      // Initialize an explicit offline scene graph architecture while waiting for connection
+      generateProceduralMap(); 
 
       const roomDoc = doc(db, 'rooms', roomId);
       const candidatesCol = collection(roomDoc, 'candidates');
       const roomSnapshot = await getDoc(roomDoc);
 
-      if (!roomSnapshot.exists()) return alert("Room not found!");
+      if (!roomSnapshot.exists()) return alert("SIGNAL MATRIX MISSED: ROOM NOT FOUND");
 
       peerConnection = new RTCPeerConnection(rtcConfig);
       peerConnection.addEventListener('datachannel', e => {
         dataChannel = e.channel;
-        setupDataChannelHandlers();
+        attachChannelPipelines();
       });
 
       peerConnection.addEventListener('icecandidate', e => {
@@ -190,56 +628,8 @@
       });
     });
 
-    function setupDataChannelHandlers() {
-      dataChannel.onopen = () => {
-        statusText.textContent = "Status: CONNECTED! WebRTC channel online.";
-        statusText.style.color = "#38a02a";
-      };
-      dataChannel.onclose = () => {
-        statusText.textContent = "Status: DISCONNECTED.";
-        statusText.style.color = "#c8382a";
-      };
-      dataChannel.onmessage = e => {
-        const data = JSON.parse(e.data);
-        remotePlayer.targetX = data.x;
-        remotePlayer.targetY = data.y;
-      };
-    }
-
-    // -- GRAPHICS ENGINE ENGINE TICK LOOP ---------------------------------------
-    function engineLoop() {
-      // 1. Core Physics & Input processing
-      processMovement();
-
-      // 2. Network State Interpolation (Lerp)
-      // Glides visual position 15% closer to target position every engine frame
-      remotePlayer.visualX += (remotePlayer.targetX - remotePlayer.visualX) * 0.15;
-      remotePlayer.visualY += (remotePlayer.targetY - remotePlayer.visualY) * 0.15;
-
-      // 3. Render Canvas Pipeline
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw Grid lines for spatial feedback
-      ctx.strokeStyle = '#1a1a1a';
-      ctx.lineWidth = 1;
-      for (let i = 0; i < canvas.width; i += 40) {
-        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
-      }
-      for (let j = 0; j < canvas.height; j += 40) {
-        ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
-      }
-
-      // Render Local Entity
-      ctx.fillStyle = localPlayer.color;
-      ctx.fillRect(localPlayer.x, localPlayer.y, 24, 24);
-
-      // Render Interp Remote Entity (using visual metrics, not direct targets)
-      ctx.fillStyle = remotePlayer.color;
-      ctx.fillRect(remotePlayer.visualX, remotePlayer.visualY, 24, 24);
-
-      requestAnimationFrame(engineLoop);
-    }
-    engineLoop();
+    // Start engine core loop
+    requestAnimationFrame(engineFrameLoop);
   </script>
 </body>
 </html>
