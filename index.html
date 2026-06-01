@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BREACH - Engine Evolution</title>
+<style>
+  body { background: #0a0a0a; color: #e0e0e0; font-family: monospace; padding: 20px; user-select: none; }
+  #setup { background: #141414; padding: 20px; border: 1px solid #333; max-width: 400px; margin-bottom: 20px; }
+  button { background: #222; color: #fff; border: 1px solid #444; padding: 8px 16px; cursor: pointer; margin-right: 10px; font-family: monospace;}
+  button:hover { background: #333; }
+  input { background: #000; color: #fff; border: 1px solid #444; padding: 7px; font-family: monospace; }
+  canvas { background: #111; display: block; border: 1px solid #222; box-shadow: 0 0 20px rgba(0,0,0,0.8); }
+  #status { color: #888; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+  <h2>ENGINE FOUNDATION V2 (LERP + SPEED ADJUSTMENT)</h2>
+  <div id="setup">
+    <button id="btnCreate">Create Lobby</button>
+    <hr style="border:0; border-top:1px solid #222; margin:15px 0;">
+    <input type="text" id="roomInput" placeholder="Enter Room ID">
+    <button id="btnJoin">Join Lobby</button>
+    <div id="status">Status: Disconnected</div>
+  </div>
+
+  <canvas id="gameCanvas" width="800" height="500"></canvas>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, doc, setDoc, addDoc, collection, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDu1Uiy1QNqQQNdTuXYwDX3H8nlKSsyv3g",
+      authDomain: "don-t-leave-me-alone.firebaseapp.com",
+      projectId: "don-t-leave-me-alone",
+      storageBucket: "don-t-leave-me-alone.firebasestorage.app",
+      messagingSenderId: "74557251120",
+      appId: "1:74557251120:web:72f4b31d2698ec38b597f5"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    const rtcConfig = { iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }] };
+
+    let peerConnection = null;
+    let dataChannel = null;
+    let isHost = false;
+
+    // Movement configuration
+    const MOVE_SPEED = 5; 
+    const keysPressed = {};
+
+    // Simulation Entities State
+    const localPlayer = { x: 100, y: 250, color: '#c8382a' };
+    
+    // Remote Player tracks both target (network) position and visual (lerped) position
+    const remotePlayer = { 
+      targetX: 150, targetY: 250, 
+      visualX: 150, visualY: 250, 
+      color: '#38a02a' 
+    };
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusText = document.getElementById('status');
+
+    // -- CONTROLLER HANDLING (Smooth Keyboard Tracking) -------------------------
+    window.addEventListener('keydown', e => { keysPressed[e.key.toLowerCase()] = true; });
+    window.addEventListener('keyup', e => { keysPressed[e.key.toLowerCase()] = false; });
+
+    function processMovement() {
+      let dx = 0;
+      let dy = 0;
+
+      if (keysPressed['w'] || keysPressed['arrowup']) dy -= 1;
+      if (keysPressed['s'] || keysPressed['arrowdown']) dy += 1;
+      if (keysPressed['a'] || keysPressed['arrowleft']) dx -= 1;
+      if (keysPressed['d'] || keysPressed['arrowright']) dx += 1;
+
+      // Check if moving
+      if (dx !== 0 || dy !== 0) {
+        // Normalize diagonals so players don't move faster at 45 degree angles
+        const length = Math.sqrt(dx * dx + dy * dy);
+        localPlayer.x += (dx / length) * MOVE_SPEED;
+        localPlayer.y += (dy / length) * MOVE_SPEED;
+
+        // Keep inside canvas bounds
+        localPlayer.x = Math.max(0, Math.min(canvas.width - 24, localPlayer.x));
+        localPlayer.y = Math.max(0, Math.min(canvas.height - 24, localPlayer.y));
+
+        // Network update drop
+        if (dataChannel && dataChannel.readyState === 'open') {
+          dataChannel.send(JSON.stringify({ x: localPlayer.x, y: localPlayer.y }));
+        }
+      }
+    }
+
+    // -- HOST FLOW -------------------------------------------------------------
+    document.getElementById('btnCreate').addEventListener('click', async () => {
+      isHost = true;
+      statusText.textContent = "Status: Generating Lobby...";
+      
+      // Update starting positions explicitly so host spawns on the left, client on right
+      localPlayer.x = 200; localPlayer.y = 250;
+      remotePlayer.targetX = 250; remotePlayer.targetY = 250;
+      remotePlayer.visualX = 250; remotePlayer.visualY = 250;
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+      dataChannel = peerConnection.createDataChannel('game-payload', { ordered: false, maxRetransmits: 0 });
+      setupDataChannelHandlers();
+
+      const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const roomDoc = doc(db, 'rooms', roomId);
+      const candidatesCol = collection(roomDoc, 'candidates');
+
+      peerConnection.addEventListener('icecandidate', e => {
+        if (e.candidate) addDoc(candidatesCol, { ...e.candidate.toJSON(), type: 'host' });
+      });
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      await setDoc(roomDoc, { offer: { type: offer.type, sdp: offer.sdp } });
+
+      document.getElementById('setup').innerHTML = `<h3>ROOM CODE: <span style="color:#ffcc44">${roomId}</span></h3><p>Share this code with your peer.</p>`;
+      statusText.textContent = "Status: Waiting for Peer Connection...";
+
+      onSnapshot(roomDoc, snapshot => {
+        const data = snapshot.data();
+        if (!peerConnection.currentRemoteDescription && data?.answer) {
+          peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        }
+      });
+
+      onSnapshot(candidatesCol, snapshot => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            if (data.type === 'client') peerConnection.addIceCandidate(new RTCIceCandidate(data));
+          }
+        });
+      });
+    });
+
+    // -- CLIENT FLOW -----------------------------------------------------------
+    document.getElementById('btnJoin').addEventListener('click', async () => {
+      const roomId = document.getElementById('roomInput').value.trim().toUpperCase();
+      if (!roomId) return alert("Please specify a valid Room Code");
+
+      isHost = false;
+      statusText.textContent = "Status: Querying host data...";
+
+      // Client spawns on the right, host target on left
+      localPlayer.x = 250; localPlayer.y = 250;
+      remotePlayer.targetX = 200; remotePlayer.targetY = 250;
+      remotePlayer.visualX = 200; remotePlayer.visualY = 250;
+
+      const roomDoc = doc(db, 'rooms', roomId);
+      const candidatesCol = collection(roomDoc, 'candidates');
+      const roomSnapshot = await getDoc(roomDoc);
+
+      if (!roomSnapshot.exists()) return alert("Room not found!");
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+      peerConnection.addEventListener('datachannel', e => {
+        dataChannel = e.channel;
+        setupDataChannelHandlers();
+      });
+
+      peerConnection.addEventListener('icecandidate', e => {
+        if (e.candidate) addDoc(candidatesCol, { ...e.candidate.toJSON(), type: 'client' });
+      });
+
+      const roomData = roomSnapshot.data();
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      await setDoc(roomDoc, { answer: { type: answer.type, sdp: answer.sdp } }, { merge: true });
+
+      onSnapshot(candidatesCol, snapshot => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            if (data.type === 'host') peerConnection.addIceCandidate(new RTCIceCandidate(data));
+          }
+        });
+      });
+    });
+
+    function setupDataChannelHandlers() {
+      dataChannel.onopen = () => {
+        statusText.textContent = "Status: CONNECTED! WebRTC channel online.";
+        statusText.style.color = "#38a02a";
+      };
+      dataChannel.onclose = () => {
+        statusText.textContent = "Status: DISCONNECTED.";
+        statusText.style.color = "#c8382a";
+      };
+      dataChannel.onmessage = e => {
+        const data = JSON.parse(e.data);
+        remotePlayer.targetX = data.x;
+        remotePlayer.targetY = data.y;
+      };
+    }
+
+    // -- GRAPHICS ENGINE ENGINE TICK LOOP ---------------------------------------
+    function engineLoop() {
+      // 1. Core Physics & Input processing
+      processMovement();
+
+      // 2. Network State Interpolation (Lerp)
+      // Glides visual position 15% closer to target position every engine frame
+      remotePlayer.visualX += (remotePlayer.targetX - remotePlayer.visualX) * 0.15;
+      remotePlayer.visualY += (remotePlayer.targetY - remotePlayer.visualY) * 0.15;
+
+      // 3. Render Canvas Pipeline
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw Grid lines for spatial feedback
+      ctx.strokeStyle = '#1a1a1a';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < canvas.width; i += 40) {
+        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+      }
+      for (let j = 0; j < canvas.height; j += 40) {
+        ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
+      }
+
+      // Render Local Entity
+      ctx.fillStyle = localPlayer.color;
+      ctx.fillRect(localPlayer.x, localPlayer.y, 24, 24);
+
+      // Render Interp Remote Entity (using visual metrics, not direct targets)
+      ctx.fillStyle = remotePlayer.color;
+      ctx.fillRect(remotePlayer.visualX, remotePlayer.visualY, 24, 24);
+
+      requestAnimationFrame(engineLoop);
+    }
+    engineLoop();
+  </script>
+</body>
+</html>
