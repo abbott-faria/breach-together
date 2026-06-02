@@ -27,8 +27,6 @@ window.addEventListener('resize', resizeViewport);
 
 const map = new MapEngine(canvas);
 const input = new InputTracker(canvas);
-
-// Dynamic Camera viewport tracking structure
 const camera = { x: 0, y: 0 };
 
 const player1 = new Actor(100, 120, '#ff4444', 'host');
@@ -38,18 +36,44 @@ let enemies = [];
 
 let clientInputsCache = { keys: {}, mouse: { x: 0, y: 0 }, click: false };
 
+function resizeViewport() {
+  const interfaceHeight = document.getElementById('interface').offsetHeight || 60;
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight - interfaceHeight;
+  ctx.imageSmoothingEnabled = false; 
+}
+resizeViewport();
+window.addEventListener('resize', resizeViewport);
+
+// Scattered Safe Zone Enemy Placements Algorithm Layout Generator
+function spawnProceduralEnemies() {
+  enemies = [];
+  
+  // Distribute across non-spawn room coordinates nodes map grids
+  map.rooms.forEach((room, index) => {
+    if (room.type === 'start') return; // Absolute protection block for spawn zone
+    
+    // Spawn 1-2 tactical guard units per facility office space
+    let count = room.type === 'end' ? 3 : Math.floor(Math.random() * 2) + 1;
+    for(let i = 0; i < count; i++) {
+      let eX = room.x + 40 + Math.random() * (room.w - 80);
+      let eY = room.y + 40 + Math.random() * (room.h - 80);
+      
+      let enemyType = (room.type === 'end' || Math.random() > 0.7) ? 'elite' : 'grunt';
+      let id = 'enemy_' + index + '_' + i + '_' + Math.random();
+      
+      enemies.push(new Enemy(id, eX, eY, enemyType));
+    }
+  });
+}
+
 function initializeNewGameLayout() {
   map.generate();
-  // Anchor spawn vectors directly out of procedural map metadata markers
-  player1.x = map.startPoint.x; player1.y = map.startPoint.y;
-  player2.x = map.startPoint.x + 40; player2.y = map.startPoint.y;
+  player1.x = map.startPoint.x; player1.y = map.startPoint.y; player1.hp = 100; player1.isDead = false;
+  player2.x = map.startPoint.x + 40; player2.y = map.startPoint.y; player2.hp = 100; player2.isDead = false;
 
   if (network.isHost) {
-    enemies = [
-      { id: 'e1', x: 600, y: 200, hp: 50, speed: 1.5, size: 12 },
-      { id: 'e2', x: 1000, y: 500, hp: 50, speed: 1.7, size: 12 },
-      { id: 'e3', x: 1500, y: 900, hp: 100, speed: 1.0, size: 16 } // Heavy Unit
-    ];
+    spawnProceduralEnemies();
   }
 }
 
@@ -60,14 +84,20 @@ const network = new NetworkManager(
       clientInputsCache = msg.payload;
     } else if (!network.isHost && msg.type === 'SNAPSHOT') {
       const snap = msg.payload;
-      player1.x = snap.p1.x; player1.y = snap.p1.y; player1.angle = snap.p1.angle; player1.hp = snap.p1.hp;
-      player2.x = snap.p2.x; player2.y = snap.p2.y; player2.angle = snap.p2.angle; player2.hp = snap.p2.hp;
+      player1.x = snap.p1.x; player1.y = snap.p1.y; player1.angle = snap.p1.angle; player1.hp = snap.p1.hp; player1.isDead = snap.p1.isDead;
+      player2.x = snap.p2.x; player2.y = snap.p2.y; player2.angle = snap.p2.angle; player2.hp = snap.p2.hp; player2.isDead = snap.p2.isDead;
       
-      // Mirror synced arrays directly onto client frame arrays
       map.boxes = snap.boxes;
       map.doors = snap.doors;
-      enemies = snap.enemies;
-      bullets = snap.bullets.map(b => new Bullet(b.x, b.y, 0, ''));
+      
+      // Client transforms raw snap packet states back into live drawable Actor classes
+      enemies = snap.enemies.map(e => {
+        let n = new Enemy(e.id, e.x, e.y, e.size > 12 ? 'elite' : 'grunt');
+        n.angle = e.angle; n.state = e.state; n.hp = e.hp;
+        return n;
+      });
+      
+      bullets = snap.bullets.map(b => new Bullet(b.x, b.y, 0, b.owner));
     }
   }
 );
@@ -95,13 +125,11 @@ function masterEngineLoop() {
   const localInput = input.getSnapshot();
   const activeFocus = network.isHost ? player1 : player2;
 
-  // Track viewport matrix adjustments relative to screen dimensions
   camera.x = activeFocus.x - canvas.width / 2;
   camera.y = activeFocus.y - canvas.height / 2;
   camera.x = Math.max(0, Math.min(map.worldWidth - canvas.width, camera.x));
   camera.y = Math.max(0, Math.min(map.worldHeight - canvas.height, camera.y));
 
-  // Translate crosshair positions to global world space coordinates
   const worldMouse = { x: localInput.mouse.x + camera.x, y: localInput.mouse.y + camera.y };
 
   if (network.isHost) {
@@ -114,17 +142,15 @@ function masterEngineLoop() {
       player2.angle = Math.atan2(clientWorldMouse.y - player2.y, clientWorldMouse.x - player2.x);
     }
 
-    // Handle weapon systems impulses
-    if (localInput.click) {
+    if (localInput.click && !player1.isDead) {
       bullets.push(new Bullet(player1.x, player1.y, player1.angle, 'host'));
       input.clickTriggered = false;
     }
-    if (clientInputsCache.click) {
+    if (clientInputsCache.click && !player2.isDead) {
       bullets.push(new Bullet(player2.x, player2.y, player2.angle, 'client'));
       clientInputsCache.click = false;
     }
 
-    // Door automated tracking
     map.doors.forEach(d => {
       let nearP1 = Math.hypot(player1.x - (d.x + d.w/2), player1.y - (d.y + d.h/2)) < 60;
       let nearP2 = network.connected && Math.hypot(player2.x - (d.x + d.w/2), player2.y - (d.y + d.h/2)) < 60;
@@ -132,74 +158,84 @@ function masterEngineLoop() {
       d.lerpOpen += ((d.open ? 1 : 0) - d.lerpOpen) * 0.15;
     });
 
-    // Update Projectiles and Hitboxes
+    // Execute Global Host Enemy AI Update Cycle Tracks
+    enemies.forEach(e => {
+      e.update(player1, player2, checkGlobalCollisions, (bx, by, ba, owner) => {
+        bullets.push(new Bullet(bx, by, ba, owner));
+      });
+    });
+
+    // Clean projectiles loop updating and checking entity collisions frames
     for (let i = bullets.length - 1; i >= 0; i--) {
       bullets[i].update();
-      let hit = checkGlobalCollisions(bullets[i].x, bullets[i].y, 2);
+      let b = bullets[i];
+      let hit = checkGlobalCollisions(b.x, b.y, 2);
       
       if (!hit) {
-        for (let b of map.boxes) {
-          if (bullets[i].x > b.x && bullets[i].x < b.x + b.w && bullets[i].y > b.y && bullets[i].y < b.y + b.h) {
-            b.hp -= 20; hit = true; break;
+        for (let box of map.boxes) {
+          if (b.x > box.x && b.x < box.x + box.w && b.y > box.y && b.y < box.y + box.h) {
+            box.hp -= 20; hit = true; break;
           }
         }
       }
+      
       if (!hit) {
-        for (let e of enemies) {
-          if (Math.hypot(bullets[i].x - e.x, bullets[i].y - e.y) < e.size) {
-            e.hp -= 25; hit = true; break;
+        // Player Bullets hitting enemies check
+        if (b.owner === 'host' || b.owner === 'client') {
+          for (let e of enemies) {
+            if (e.hp > 0 && Math.hypot(b.x - e.x, b.y - e.y) < e.size) {
+              e.hp -= 25; hit = true; break;
+            }
+          }
+        } 
+        // Enemy Bullets hitting players check
+        else if (b.owner === 'enemy') {
+          if (!player1.isDead && Math.hypot(b.x - player1.x, b.y - player1.y) < player1.size) {
+            player1.hp -= 10; if (player1.hp <= 0) player1.isDead = true; hit = true;
+          }
+          if (!hit && network.connected && !player2.isDead && Math.hypot(b.x - player2.x, b.y - player2.y) < player2.size) {
+            player2.hp -= 10; if (player2.hp <= 0) player2.isDead = true; hit = true;
           }
         }
       }
-      if (hit) bullets.splice(i, 1);
+
+      if (hit || b.x < 0 || b.x > map.worldWidth || b.y < 0 || b.y > map.worldHeight) {
+        bullets.splice(i, 1);
+      }
     }
 
     map.boxes = map.boxes.filter(b => b.hp > 0);
+    enemies = enemies.filter(e => e.hp > 0);
 
-    // Process Basic Enemy AI Vectors
-    for (let i = enemies.length - 1; i >= 0; i--) {
-      let e = enemies[i];
-      if (e.hp <= 0) { enemies.splice(i, 1); continue; }
-      
-      let target = (network.connected && Math.hypot(player2.x - e.x, player2.y - e.y) < Math.hypot(player1.x - e.x, player1.y - e.y)) ? player2 : player1;
-      let angle = Math.atan2(target.y - e.y, target.x - e.x);
-      let nX = e.x + Math.cos(angle) * e.speed;
-      let nY = e.y + Math.sin(angle) * e.speed;
-      if (!checkGlobalCollisions(nX, nY, e.size)) { e.x = nX; e.y = nY; }
-    }
-
-    // Broadcast Snapshot Packages downstream
     network.send({
       type: 'SNAPSHOT',
       payload: {
-        p1: player1, p2: player2,
-        enemies: enemies,
+        p1: { x: player1.x, y: player1.y, angle: player1.angle, hp: player1.hp, isDead: player1.isDead },
+        p2: { x: player2.x, y: player2.y, angle: player2.angle, hp: player2.hp, isDead: player2.isDead },
+        enemies: enemies.map(e => ({ id: e.id, x: e.x, y: e.y, angle: e.angle, state: e.state, hp: e.hp, size: e.size })),
         doors: map.doors,
         boxes: map.boxes,
-        bullets: bullets.map(b => ({ x: b.x, y: b.y }))
+        bullets: bullets.map(b => ({ x: b.x, y: b.y, owner: b.owner }))
       }
     });
 
   } else {
-    // Client upstream execution pipeline
     network.send({ type: 'INPUT', payload: localInput });
   }
 
-  // --- RENDERING TRANSFORM MATRICES VIA CAMERA OFFSET ---
+  // --- RENDERING ROUTINES ---
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
   ctx.save();
-  ctx.translate(-camera.x, -camera.y); // Shift world context coordinate grid system backwards
+  ctx.translate(-camera.x, -camera.y);
 
   map.draw(ctx);
 
-  // Draw Boxes
   map.boxes.forEach(b => {
     ctx.fillStyle = '#5c4028'; ctx.strokeStyle = '#3d2a1a';
     ctx.fillRect(b.x, b.y, b.w, b.h); ctx.strokeRect(b.x, b.y, b.w, b.h);
   });
 
-  // Draw Sliding Partition Openings
   map.doors.forEach(d => {
     let isHorizontal = d.w > d.h;
     ctx.fillStyle = '#3a4f6e';
@@ -212,21 +248,16 @@ function masterEngineLoop() {
     }
   });
 
-  // Render Actors
   bullets.forEach(b => b.draw(ctx));
-  
-  enemies.forEach(e => {
-    ctx.fillStyle = '#ff3333'; ctx.beginPath(); ctx.arc(e.x, e.y, e.size, 0, Math.PI*2); ctx.fill();
-  });
-
+  enemies.forEach(e => e.draw(ctx));
   player1.draw(ctx);
   player2.draw(ctx);
 
-  // Render Extraction Pad Indicator Icon Target UI marker
+  // Extraction Marker UI Graphic Vector
   ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 3; ctx.beginPath();
   ctx.arc(map.endPoint.x, map.endPoint.y, 40, 0, Math.PI*2); ctx.stroke();
 
-  ctx.restore(); // Drop camera offset state matrix back to absolute screen canvas coords
+  ctx.restore();
   requestAnimationFrame(masterEngineLoop);
 }
 
