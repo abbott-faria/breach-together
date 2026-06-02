@@ -5,13 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BREACH - Modular</title>
 <style>
-  body { background: #070708; color: #a0a5b5; font-family: monospace; padding: 15px; margin: 0; overflow: hidden; user-select: none; }
-  #interface { background: #0f1015; padding: 15px; border: 1px solid #222530; display: flex; gap: 15px; align-items: center; margin-bottom: 10px; }
+  body { 
+    background: #070708; 
+    color: #a0a5b5; 
+    font-family: monospace; 
+    padding: 0; 
+    margin: 0; 
+    overflow: hidden; 
+    user-select: none; 
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #interface { 
+    background: #0f1015; 
+    padding: 15px; 
+    border-bottom: 1px solid #222530; 
+    display: flex; 
+    gap: 15px; 
+    align-items: center; 
+    z-index: 10; /* Keeps UI controls on top of the fullscreen canvas */
+  }
   button { background: #1c1d26; color: #fff; border: 1px solid #32374a; padding: 6px 12px; cursor: pointer; font-family: monospace; font-weight: bold; }
   button:hover { background: #252733; border-color: #434961; }
   input { background: #020203; color: #ffcc44; border: 1px solid #32374a; padding: 6px; font-family: monospace; width: 100px; text-transform: uppercase; text-align: center;}
   #status { font-size: 11px; color: #62687d; }
-  canvas { background: #020203; display: block; border: 1px solid #1c1d26; box-shadow: 0 10px 30px rgba(0,0,0,0.7); }
+  canvas { 
+    background: #020203; 
+    display: block; 
+    flex-grow: 1; /* Allows the canvas to comfortably fill all remaining space */
+  }
 </style>
 </head>
 <body>
@@ -25,8 +48,4 @@
     <div id="status">SYS // DISCONNECTED</div>
   </div>
 
-  <canvas id="gameCanvas" width="960" height="640"></canvas>
-
-  <script type="module" src="src/main.js"></script>
-</body>
-</html>
+  <canvas id="gameCanvas"></canvas>
