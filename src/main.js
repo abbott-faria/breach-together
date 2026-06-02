@@ -17,33 +17,28 @@ let enemies = [];
 
 let clientInputsCache = { keys: {}, mouse: { x: 0, y: 0 }, click: false };
 
-// --- 1. VIEWPORT ENGINE RESIZER (DE-DUPLICATED) ---
 function resizeViewport() {
   const interfaceElement = document.getElementById('interface');
   const interfaceHeight = interfaceElement ? interfaceElement.offsetHeight : 60;
-  
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight - interfaceHeight;
-  
   ctx.imageSmoothingEnabled = false; 
 }
 resizeViewport();
 window.addEventListener('resize', resizeViewport);
 
-// --- 2. GAME MECHANICS INITIALIZERS ---
 function spawnProceduralEnemies() {
   enemies = [];
+  if (!map.rooms || map.rooms.length === 0) return;
+  
   map.rooms.forEach((room, index) => {
-    if (room.type === 'start') return; // Absolute protection for player spawn room
-    
+    if (room.type === 'start') return;
     let count = room.type === 'end' ? 3 : Math.floor(Math.random() * 2) + 1;
     for(let i = 0; i < count; i++) {
       let eX = room.x + 40 + Math.random() * (room.w - 80);
       let eY = room.y + 40 + Math.random() * (room.h - 80);
-      
       let enemyType = (room.type === 'end' || Math.random() > 0.7) ? 'elite' : 'grunt';
       let id = 'enemy_' + index + '_' + i + '_' + Math.random();
-      
       enemies.push(new Enemy(id, eX, eY, enemyType));
     }
   });
@@ -51,19 +46,13 @@ function spawnProceduralEnemies() {
 
 function initializeNewGameLayout() {
   map.generate();
-  player1.x = map.startPoint.x; player1.y = map.startPoint.y; player1.hp = 100; player1.isDead = false;
-  player2.x = map.startPoint.x + 40; player2.y = map.startPoint.y; player2.hp = 100; player2.isDead = false;
-
-  // Defensive check: Only try to spawn host enemies if network has finished instantiating
-  if (typeof network !== 'undefined' && network.isHost) {
-    spawnProceduralEnemies();
-  } else if (typeof network === 'undefined') {
-    // Local offline preview state fallback loop
-    spawnProceduralEnemies();
+  if (map.startPoint) {
+    player1.x = map.startPoint.x; player1.y = map.startPoint.y; player1.hp = 100; player1.isDead = false;
+    player2.x = map.startPoint.x + 40; player2.y = map.startPoint.y; player2.hp = 100; player2.isDead = false;
   }
+  spawnProceduralEnemies();
 }
 
-// --- 3. NETWORKING MANAGER HANDSHAKES (MOVED UP FOR HOISTING SAFETY) ---
 const network = new NetworkManager(
   (isHost) => { initializeNewGameLayout(); },
   (msg) => {
@@ -73,44 +62,41 @@ const network = new NetworkManager(
       const snap = msg.payload;
       player1.x = snap.p1.x; player1.y = snap.p1.y; player1.angle = snap.p1.angle; player1.hp = snap.p1.hp; player1.isDead = snap.p1.isDead;
       player2.x = snap.p2.x; player2.y = snap.p2.y; player2.angle = snap.p2.angle; player2.hp = snap.p2.hp; player2.isDead = snap.p2.isDead;
-      
       map.boxes = snap.boxes;
       map.doors = snap.doors;
-      
       enemies = snap.enemies.map(e => {
         let n = new Enemy(e.id, e.x, e.y, e.size > 12 ? 'elite' : 'grunt');
         n.angle = e.angle; n.state = e.state; n.hp = e.hp;
         return n;
       });
-      
       bullets = snap.bullets.map(b => new Bullet(b.x, b.y, 0, b.owner));
     }
   }
 );
 
-// Bind UI elements
 document.getElementById('btnCreate').addEventListener('click', () => network.hostLobby());
 document.getElementById('btnJoin').addEventListener('click', () => {
   const code = document.getElementById('roomInput').value.trim();
   if(code) network.joinLobby(code);
 });
 
-// Run map construction safely now that network constants are declared
 initializeNewGameLayout();
 
-// --- 4. COLLISION FRAMEWORK BOUNDS ---
 function checkGlobalCollisions(x, y, size) {
   if (map.checkWallCollision(x, y, size)) return true;
-  for (let b of map.boxes) {
-    if (x + size > b.x && x - size < b.x + b.w && y + size > b.y && y - size < b.y + b.h) return true;
+  if (map.boxes) {
+    for (let b of map.boxes) {
+      if (x + size > b.x && x - size < b.x + b.w && y + size > b.y && y - size < b.y + b.h) return true;
+    }
   }
-  for (let d of map.doors) {
-    if (!d.open && x + size > d.x && x - size < d.x + d.w && y + size > d.y && y - size < d.y + d.h) return true;
+  if (map.doors) {
+    for (let d of map.doors) {
+      if (!d.open && x + size > d.x && x - size < d.x + d.w && y + size > d.y && y - size < d.y + d.h) return true;
+    }
   }
   return false;
 }
 
-// --- 5. MASTER CORE RUNTIME LOOPS ---
 function masterEngineLoop() {
   const localInput = input.getSnapshot();
   const activeFocus = network.isHost ? player1 : player2;
@@ -141,12 +127,14 @@ function masterEngineLoop() {
       clientInputsCache.click = false;
     }
 
-    map.doors.forEach(d => {
-      let nearP1 = Math.hypot(player1.x - (d.x + d.w/2), player1.y - (d.y + d.h/2)) < 60;
-      let nearP2 = network.connected && Math.hypot(player2.x - (d.x + d.w/2), player2.y - (d.y + d.h/2)) < 60;
-      d.open = nearP1 || nearP2;
-      d.lerpOpen += ((d.open ? 1 : 0) - d.lerpOpen) * 0.15;
-    });
+    if (map.doors) {
+      map.doors.forEach(d => {
+        let nearP1 = Math.hypot(player1.x - (d.x + d.w/2), player1.y - (d.y + d.h/2)) < 60;
+        let nearP2 = network.connected && Math.hypot(player2.x - (d.x + d.w/2), player2.y - (d.y + d.h/2)) < 60;
+        d.open = nearP1 || nearP2;
+        d.lerpOpen += ((d.open ? 1 : 0) - d.lerpOpen) * 0.15;
+      });
+    }
 
     enemies.forEach(e => {
       e.update(player1, player2, checkGlobalCollisions, (bx, by, ba, owner) => {
@@ -159,7 +147,7 @@ function masterEngineLoop() {
       let b = bullets[i];
       let hit = checkGlobalCollisions(b.x, b.y, 2);
       
-      if (!hit) {
+      if (!hit && map.boxes) {
         for (let box of map.boxes) {
           if (b.x > box.x && b.x < box.x + box.w && b.y > box.y && b.y < box.y + box.h) {
             box.hp -= 20; hit = true; break;
@@ -190,7 +178,7 @@ function masterEngineLoop() {
       }
     }
 
-    map.boxes = map.boxes.filter(b => b.hp > 0);
+    if (map.boxes) map.boxes = map.boxes.filter(b => b.hp > 0);
     enemies = enemies.filter(e => e.hp > 0);
 
     network.send({
@@ -209,7 +197,6 @@ function masterEngineLoop() {
     network.send({ type: 'INPUT', payload: localInput });
   }
 
-  // --- RENDERING PIPELINES ---
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
   ctx.save();
@@ -217,30 +204,36 @@ function masterEngineLoop() {
 
   map.draw(ctx);
 
-  map.boxes.forEach(b => {
-    ctx.fillStyle = '#5c4028'; ctx.strokeStyle = '#3d2a1a';
-    ctx.fillRect(b.x, b.y, b.w, b.h); ctx.strokeRect(b.x, b.y, b.w, b.h);
-  });
+  if (map.boxes) {
+    map.boxes.forEach(b => {
+      ctx.fillStyle = '#5c4028'; ctx.strokeStyle = '#3d2a1a';
+      ctx.fillRect(b.x, b.y, b.w, b.h); ctx.strokeRect(b.x, b.y, b.w, b.h);
+    });
+  }
 
-  map.doors.forEach(d => {
-    let isHorizontal = d.w > d.h;
-    ctx.fillStyle = '#3a4f6e';
-    if (isHorizontal) {
-      let currentW = d.w * (1 - d.lerpOpen);
-      if (currentW > 0) ctx.fillRect(d.x, d.y, currentW, d.h);
-    } else {
-      let currentH = d.h * (1 - d.lerpOpen);
-      if (currentH > 0) ctx.fillRect(d.x, d.y, d.w, currentH);
-    }
-  });
+  if (map.doors) {
+    map.doors.forEach(d => {
+      let isHorizontal = d.w > d.h;
+      ctx.fillStyle = '#3a4f6e';
+      if (isHorizontal) {
+        let currentW = d.w * (1 - d.lerpOpen);
+        if (currentW > 0) ctx.fillRect(d.x, d.y, currentW, d.h);
+      } else {
+        let currentH = d.h * (1 - d.lerpOpen);
+        if (currentH > 0) ctx.fillRect(d.x, d.y, d.w, currentH);
+      }
+    });
+  }
 
   bullets.forEach(b => b.draw(ctx));
   enemies.forEach(e => e.draw(ctx));
   player1.draw(ctx);
   player2.draw(ctx);
 
-  ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 3; ctx.beginPath();
-  ctx.arc(map.endPoint.x, map.endPoint.y, 40, 0, Math.PI*2); ctx.stroke();
+  if (map.endPoint) {
+    ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 3; ctx.beginPath();
+    ctx.arc(map.endPoint.x, map.endPoint.y, 40, 0, Math.PI*2); ctx.stroke();
+  }
 
   ctx.restore();
   requestAnimationFrame(masterEngineLoop);
