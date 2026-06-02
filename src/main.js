@@ -1,29 +1,10 @@
 import { InputTracker } from './input.js';
 import { NetworkManager } from './network.js';
 import { MapEngine } from './map.js';
-import { Actor, Bullet } from './entities.js';
+import { Actor, Bullet, Enemy } from './entities.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
-
-// ----------------------------------------
-function resizeViewport() {
-  const interfaceHeight = document.getElementById('interface').offsetHeight || 60;
-  
-  // Set the structural resolution to match the physical screen space exactly
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight - interfaceHeight;
-  
-  // Turn off image smoothing to keep our retro wall borders razor sharp
-  ctx.imageSmoothingEnabled = false; 
-}
-
-// Execute immediately at startup
-resizeViewport();
-
-// Listen for window changes and adapt on the fly
-window.addEventListener('resize', resizeViewport);
-// ------------------------------------------
 
 const map = new MapEngine(canvas);
 const input = new InputTracker(canvas);
@@ -36,24 +17,25 @@ let enemies = [];
 
 let clientInputsCache = { keys: {}, mouse: { x: 0, y: 0 }, click: false };
 
+// --- 1. VIEWPORT ENGINE RESIZER (DE-DUPLICATED) ---
 function resizeViewport() {
-  const interfaceHeight = document.getElementById('interface').offsetHeight || 60;
+  const interfaceElement = document.getElementById('interface');
+  const interfaceHeight = interfaceElement ? interfaceElement.offsetHeight : 60;
+  
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight - interfaceHeight;
+  
   ctx.imageSmoothingEnabled = false; 
 }
 resizeViewport();
 window.addEventListener('resize', resizeViewport);
 
-// Scattered Safe Zone Enemy Placements Algorithm Layout Generator
+// --- 2. GAME MECHANICS INITIALIZERS ---
 function spawnProceduralEnemies() {
   enemies = [];
-  
-  // Distribute across non-spawn room coordinates nodes map grids
   map.rooms.forEach((room, index) => {
-    if (room.type === 'start') return; // Absolute protection block for spawn zone
+    if (room.type === 'start') return; // Absolute protection for player spawn room
     
-    // Spawn 1-2 tactical guard units per facility office space
     let count = room.type === 'end' ? 3 : Math.floor(Math.random() * 2) + 1;
     for(let i = 0; i < count; i++) {
       let eX = room.x + 40 + Math.random() * (room.w - 80);
@@ -72,11 +54,16 @@ function initializeNewGameLayout() {
   player1.x = map.startPoint.x; player1.y = map.startPoint.y; player1.hp = 100; player1.isDead = false;
   player2.x = map.startPoint.x + 40; player2.y = map.startPoint.y; player2.hp = 100; player2.isDead = false;
 
-  if (network.isHost) {
+  // Defensive check: Only try to spawn host enemies if network has finished instantiating
+  if (typeof network !== 'undefined' && network.isHost) {
+    spawnProceduralEnemies();
+  } else if (typeof network === 'undefined') {
+    // Local offline preview state fallback loop
     spawnProceduralEnemies();
   }
 }
 
+// --- 3. NETWORKING MANAGER HANDSHAKES (MOVED UP FOR HOISTING SAFETY) ---
 const network = new NetworkManager(
   (isHost) => { initializeNewGameLayout(); },
   (msg) => {
@@ -90,7 +77,6 @@ const network = new NetworkManager(
       map.boxes = snap.boxes;
       map.doors = snap.doors;
       
-      // Client transforms raw snap packet states back into live drawable Actor classes
       enemies = snap.enemies.map(e => {
         let n = new Enemy(e.id, e.x, e.y, e.size > 12 ? 'elite' : 'grunt');
         n.angle = e.angle; n.state = e.state; n.hp = e.hp;
@@ -102,14 +88,17 @@ const network = new NetworkManager(
   }
 );
 
+// Bind UI elements
 document.getElementById('btnCreate').addEventListener('click', () => network.hostLobby());
 document.getElementById('btnJoin').addEventListener('click', () => {
   const code = document.getElementById('roomInput').value.trim();
   if(code) network.joinLobby(code);
 });
 
+// Run map construction safely now that network constants are declared
 initializeNewGameLayout();
 
+// --- 4. COLLISION FRAMEWORK BOUNDS ---
 function checkGlobalCollisions(x, y, size) {
   if (map.checkWallCollision(x, y, size)) return true;
   for (let b of map.boxes) {
@@ -121,6 +110,7 @@ function checkGlobalCollisions(x, y, size) {
   return false;
 }
 
+// --- 5. MASTER CORE RUNTIME LOOPS ---
 function masterEngineLoop() {
   const localInput = input.getSnapshot();
   const activeFocus = network.isHost ? player1 : player2;
@@ -158,14 +148,12 @@ function masterEngineLoop() {
       d.lerpOpen += ((d.open ? 1 : 0) - d.lerpOpen) * 0.15;
     });
 
-    // Execute Global Host Enemy AI Update Cycle Tracks
     enemies.forEach(e => {
       e.update(player1, player2, checkGlobalCollisions, (bx, by, ba, owner) => {
         bullets.push(new Bullet(bx, by, ba, owner));
       });
     });
 
-    // Clean projectiles loop updating and checking entity collisions frames
     for (let i = bullets.length - 1; i >= 0; i--) {
       bullets[i].update();
       let b = bullets[i];
@@ -180,7 +168,6 @@ function masterEngineLoop() {
       }
       
       if (!hit) {
-        // Player Bullets hitting enemies check
         if (b.owner === 'host' || b.owner === 'client') {
           for (let e of enemies) {
             if (e.hp > 0 && Math.hypot(b.x - e.x, b.y - e.y) < e.size) {
@@ -188,7 +175,6 @@ function masterEngineLoop() {
             }
           }
         } 
-        // Enemy Bullets hitting players check
         else if (b.owner === 'enemy') {
           if (!player1.isDead && Math.hypot(b.x - player1.x, b.y - player1.y) < player1.size) {
             player1.hp -= 10; if (player1.hp <= 0) player1.isDead = true; hit = true;
@@ -223,7 +209,7 @@ function masterEngineLoop() {
     network.send({ type: 'INPUT', payload: localInput });
   }
 
-  // --- RENDERING ROUTINES ---
+  // --- RENDERING PIPELINES ---
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
   ctx.save();
@@ -253,7 +239,6 @@ function masterEngineLoop() {
   player1.draw(ctx);
   player2.draw(ctx);
 
-  // Extraction Marker UI Graphic Vector
   ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 3; ctx.beginPath();
   ctx.arc(map.endPoint.x, map.endPoint.y, 40, 0, Math.PI*2); ctx.stroke();
 
