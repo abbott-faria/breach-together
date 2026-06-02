@@ -6,6 +6,25 @@ import { Actor, Bullet } from './entities.js';
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
+// ----------------------------------------
+function resizeViewport() {
+  const interfaceHeight = document.getElementById('interface').offsetHeight || 60;
+  
+  // Set the structural resolution to match the physical screen space exactly
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight - interfaceHeight;
+  
+  // Turn off image smoothing to keep our retro wall borders razor sharp
+  ctx.imageSmoothingEnabled = false; 
+}
+
+// Execute immediately at startup
+resizeViewport();
+
+// Listen for window changes and adapt on the fly
+window.addEventListener('resize', resizeViewport);
+// ------------------------------------------
+
 const map = new MapEngine(canvas);
 const input = new InputTracker(canvas);
 
