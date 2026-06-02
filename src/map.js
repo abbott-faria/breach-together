@@ -30,7 +30,7 @@ export class MapEngine {
     this.startPoint = { x: startRoom.x + 80, y: startRoom.y + 100 };
 
     // 2. Map Room Config Node Blueprints
-    const building Blueprints = [
+    const buildingBlueprints = [
       { x: 420, y: 60, w: 300, h: 240 },
       { x: 820, y: 80, w: 240, h: 220 },
       { x: 1160, y: 60, w: 340, h: 260 },
